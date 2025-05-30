@@ -8,12 +8,6 @@ import hashlib
 app = Flask(__name__)
 
 # --- Configuration (Load from .env for security and flexibility) ---
-# It's crucial to use environment variables for sensitive info like MongoDB URI and webhook secret.
-# Create a .env file in the same directory as app.py with these variables:
-# MONGO_URI="mongodb://localhost:27017/" # Or your MongoDB Atlas URI
-# GITHUB_WEBHOOK_SECRET="your_github_webhook_secret_here" # Matches the secret set in GitHub webhook config
-
-# Load environment variables
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -22,6 +16,8 @@ except ImportError:
 
 MONGO_URI = os.getenv("MONGO_URI")
 GITHUB_WEBHOOK_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET")
+# It's good practice to get the port from environment variables too, for flexible deployment
+PORT = int(os.getenv("PORT", 5000)) # Default to 5000 if not set
 
 if not MONGO_URI:
     print("Error: MONGO_URI environment variable not set.")
@@ -44,16 +40,14 @@ def verify_github_signature(data, signature):
         print("Warning: GITHUB_WEBHOOK_SECRET is not set. Webhook signature will not be verified.")
         return True # Proceed without verification if no secret is set (NOT recommended for production)
 
-    # GitHub sends 'X-Hub-Signature-256' for SHA256, or 'X-Hub-Signature' for SHA1
-    # Check for SHA256 first
     if signature.startswith('sha256='):
         hash_algorithm = 'sha256'
-        signature_hash = signature[7:] # Remove 'sha256='
+        signature_hash = signature[7:]
     elif signature.startswith('sha1='):
         hash_algorithm = 'sha1'
-        signature_hash = signature[5:] # Remove 'sha1='
+        signature_hash = signature[5:]
     else:
-        return False # Unknown signature format
+        return False
 
     mac = hmac.new(GITHUB_WEBHOOK_SECRET.encode('utf-8'), msg=data, digestmod=getattr(hashlib, hash_algorithm))
     return hmac.compare_digest(mac.hexdigest(), signature_hash)
@@ -63,54 +57,41 @@ def verify_github_signature(data, signature):
 @app.route('/webhook', methods=['POST'])
 def github_webhook():
     if request.method == 'POST':
-        # 1. Verify GitHub Signature (Highly Recommended for Security)
         github_signature = request.headers.get('X-Hub-Signature-256') or request.headers.get('X-Hub-Signature')
         if github_signature is None:
             print("No GitHub signature found in headers.")
-            # Depending on your setup, you might want to abort here if no secret is expected
             if GITHUB_WEBHOOK_SECRET:
-                abort(403) # Forbidden if secret is configured but no signature is provided
+                abort(403)
 
         request_data = request.get_data()
         if not verify_github_signature(request_data, github_signature):
             print("Webhook signature verification failed.")
-            abort(403) # Forbidden
+            abort(403)
 
-        # 2. Get GitHub Event Type
         event_type = request.headers.get('X-GitHub-Event')
-        payload = request.json # GitHub sends JSON payloads
+        payload = request.json
 
         print(f"Received GitHub event: {event_type}")
-        # print(f"Payload: {payload}") # Uncomment for debugging payload structure
 
-        # 3. Process Payload based on Event Type
         processed_data = {}
         try:
-            timestamp = datetime.utcnow().isoformat(timespec='seconds') + 'Z' # UTC format
+            timestamp = datetime.utcnow().isoformat(timespec='seconds') + 'Z'
 
             if event_type == 'push':
                 processed_data = process_push_event(payload, timestamp)
             elif event_type == 'pull_request':
-                # Pull Request events cover 'opened', 'reopened', 'closed', 'assigned', etc.
-                # We are interested in 'opened' (for PR creation) and 'closed' (for merge).
                 if payload['action'] == 'opened':
                     processed_data = process_pull_request_opened_event(payload, timestamp)
                 elif payload['action'] == 'closed' and payload['pull_request']['merged']:
-                    # This covers the MERGE action as a 'closed' PR that was 'merged'
                     processed_data = process_merge_event(payload, timestamp)
                 else:
                     print(f"Ignoring pull_request event action: {payload['action']}")
                     return jsonify({'status': 'ignored', 'message': 'Pull Request action not relevant'}), 200
-            # For other merge scenarios (e.g., direct pushes to master that result in a merge,
-            # or different ways a 'merge' might be represented by GitHub's events),
-            # you might need to add more `elif` conditions or refine the `process_merge_event` logic.
-            # This is a common point for adjustment based on specific GitHub workflows.
             else:
                 print(f"Ignoring GitHub event type: {event_type}")
                 return jsonify({'status': 'ignored', 'message': 'Event type not relevant'}), 200
 
             if processed_data:
-                # 4. Store Data in MongoDB
                 actions_collection.insert_one(processed_data)
                 print(f"Data stored in MongoDB: {processed_data}")
                 return jsonify({'status': 'success', 'message': 'Webhook received and processed'}), 200
@@ -130,14 +111,10 @@ def github_webhook():
 # --- Payload Processing Functions ---
 
 def process_push_event(payload, timestamp):
-    # This is a simplified extraction. GitHub push payloads are extensive.
-    # You'll need to carefully examine the payload structure for the exact fields.
-    # Check payload['head_commit'] and payload['pusher']
     author = payload['pusher']['name'] if 'pusher' in payload and 'name' in payload['pusher'] else 'Unknown'
-    to_branch = payload['ref'].split('/')[-1] if 'ref' in payload else 'Unknown' # e.g., "refs/heads/master" -> "master"
-    request_id = payload['after'] # Commit hash after the push
+    to_branch = payload['ref'].split('/')[-1] if 'ref' in payload else 'Unknown'
+    request_id = payload['after']
 
-    # Ensure author is not None or empty
     if not author:
         author = payload['sender']['login'] if 'sender' in payload and 'login' in payload['sender'] else 'Unknown'
 
@@ -145,16 +122,15 @@ def process_push_event(payload, timestamp):
         'request_id': request_id,
         'author': author,
         'action': 'PUSH',
-        'from_branch': '', # PUSH doesn't explicitly have a 'from_branch' in the same way PRs do
+        'from_branch': '',
         'to_branch': to_branch,
         'timestamp': timestamp
     }
 
 def process_pull_request_opened_event(payload, timestamp):
-    # Extract details for a new pull request
     pr = payload['pull_request']
     return {
-        'request_id': str(pr['id']), # PR ID
+        'request_id': str(pr['id']),
         'author': pr['user']['login'],
         'action': 'PULL_REQUEST',
         'from_branch': pr['head']['ref'],
@@ -163,12 +139,10 @@ def process_pull_request_opened_event(payload, timestamp):
     }
 
 def process_merge_event(payload, timestamp):
-    # This specifically handles a Pull Request being merged.
-    # GitHub often sends 'pull_request' event with action 'closed' and 'merged: true'.
     pr = payload['pull_request']
     return {
-        'request_id': str(pr['merge_commit_sha']) if pr['merge_commit_sha'] else str(pr['id']), # Use merge commit SHA or PR ID
-        'author': pr['merged_by']['login'] if pr['merged_by'] else pr['user']['login'], # Who merged it
+        'request_id': str(pr['merge_commit_sha']) if pr['merge_commit_sha'] else str(pr['id']),
+        'author': pr['merged_by']['login'] if pr['merged_by'] else pr['user']['login'],
         'action': 'MERGE',
         'from_branch': pr['head']['ref'],
         'to_branch': pr['base']['ref'],
@@ -180,10 +154,8 @@ def process_merge_event(payload, timestamp):
 @app.route('/data', methods=['GET'])
 def get_data():
     try:
-        # Fetch the latest 10 (or more, adjust as needed) actions, sorted by timestamp descending
         latest_actions = list(actions_collection.find().sort('timestamp', -1).limit(10))
 
-        # MongoDB's _id is an ObjectId, which is not directly JSON serializable. Convert it to string.
         for action in latest_actions:
             action['_id'] = str(action['_id'])
         
@@ -192,9 +164,5 @@ def get_data():
         print(f"Error fetching data from MongoDB: {e}")
         return jsonify({'status': 'error', 'message': 'Could not retrieve data'}), 500
 
-
-# --- Run the Flask app ---
-if __name__ == '__main__':
-    # For local development, set host to '0.0.0.0' to be accessible over network (e.g., by ngrok)
-    # In production, use a production-ready WSGI server like Gunicorn.
-    app.run(debug=True, host='0.0.0.0', port=5000)
+# Removed the if __name__ == '__main__': block
+# Gunicorn will now directly import and run the 'app' object
