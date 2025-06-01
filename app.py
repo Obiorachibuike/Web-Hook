@@ -63,12 +63,14 @@ def github_webhook():
     github_signature = request.headers.get('X-Hub-Signature-256') or request.headers.get('X-Hub-Signature')
     if not github_signature and GITHUB_WEBHOOK_SECRET:
         logging.warning("No GitHub signature found in headers.")
-        abort(403)
+        # Sent response message that signature is missing
+        return jsonify({'status': 'error', 'message': 'GitHub signature missing in headers.'}), 403
 
     request_data = request.get_data()
     if not verify_github_signature(request_data, github_signature):
         logging.warning("Webhook signature verification failed.")
-        abort(403)
+        # Sent response message about verification failure
+        return jsonify({'status': 'error', 'message': 'Webhook signature verification failed.'}), 403
 
     event_type = request.headers.get('X-GitHub-Event')
     payload = request.json
@@ -88,18 +90,18 @@ def github_webhook():
                 processed_data = process_merge_event(payload, timestamp)
             else:
                 logging.info(f"Ignored pull_request action: {payload['action']}")
-                return jsonify({'status': 'ignored', 'message': 'Pull Request action not relevant'}), 200
+                return jsonify({'status': 'ignored', 'message': f'Pull Request action not relevant: {payload["action"]}'}), 200
         else:
             logging.info(f"Ignored GitHub event type: {event_type}")
-            return jsonify({'status': 'ignored', 'message': 'Event type not relevant'}), 200
+            return jsonify({'status': 'ignored', 'message': f'Event type not relevant: {event_type}'}), 200
 
         if processed_data:
             actions_collection.insert_one(processed_data)
             logging.info(f"Data stored in MongoDB: {processed_data}")
-            return jsonify({'status': 'success', 'message': 'Webhook received and processed'}), 200
+            return jsonify({'status': 'success', 'message': 'Webhook received and processed', 'data': processed_data}), 200
         else:
             logging.info("Event processed but no data to store.")
-            return jsonify({'status': 'ignored', 'message': 'No data extracted'}), 200
+            return jsonify({'status': 'ignored', 'message': 'No data extracted from event'}), 200
 
     except KeyError as e:
         logging.error(f"KeyError: Missing key in payload: {e}")
@@ -113,7 +115,6 @@ def process_push_event(payload, timestamp):
     author = payload.get('pusher', {}).get('name', payload.get('sender', {}).get('login', 'Unknown'))
     to_branch = payload.get('ref', '').split('/')[-1]
     request_id = payload.get('after', 'N/A')
-
     return {
         'request_id': request_id,
         'author': author,
@@ -153,7 +154,7 @@ def get_data():
 
         if not latest_actions:
             logging.info("No actions found in the database.")
-            return jsonify({'status': 'empty', 'message': 'No data found in the database.'}), 404
+            return jsonify({'status': 'empty', 'message': 'No data found in the database.', 'data': []}), 200
 
         for action in latest_actions:
             action['_id'] = str(action['_id'])
@@ -163,9 +164,10 @@ def get_data():
 
     except Exception as e:
         logging.error(f"Failed to fetch data from MongoDB: {e}")
-        return jsonify({'status': 'error', 'message': f'Could not retrieve data: {e}'}), 500
+        return jsonify({'status': 'error', 'message': f'Could not retrieve data: {e}', 'data': []}), 500
 
 # --- Main Entry ---
 if __name__ == '__main__':
     logging.info(f"Starting Flask app on port {PORT}...")
     app.run(host='0.0.0.0', port=PORT)
+
