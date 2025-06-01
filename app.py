@@ -1,41 +1,48 @@
 import os
+import logging
 from flask import Flask, request, jsonify, abort
 from pymongo import MongoClient
 from datetime import datetime
 import hmac
 import hashlib
 
+# --- Logging Configuration ---
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+
 app = Flask(__name__)
 
-# --- Configuration (Load from .env for security and flexibility) ---
+# --- Load Environment Variables ---
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
-    print("python-dotenv not installed. Please install it (`pip install python-dotenv`) or set environment variables manually.")
+    logging.warning("python-dotenv not installed. Install it or set env variables manually.")
 
 MONGO_URI = os.getenv("MONGO_URI")
 GITHUB_WEBHOOK_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET")
-PORT = int(os.getenv("PORT", 5000))  # Default to 5000 if not set
+PORT = int(os.getenv("PORT", 5000))
 
 if not MONGO_URI:
-    print("Error: MONGO_URI environment variable not set.")
+    logging.error("MONGO_URI environment variable not set.")
     exit(1)
 
-# MongoDB Connection
+# --- MongoDB Connection ---
 try:
     client = MongoClient(MONGO_URI)
     db = client['github_webhooks_db']
     actions_collection = db['actions']
-    print("Connected to MongoDB successfully!")
+    logging.info("Connected to MongoDB successfully.")
 except Exception as e:
-    print(f"Error connecting to MongoDB: {e}")
+    logging.error(f"Error connecting to MongoDB: {e}")
     exit(1)
 
-# --- Helper Function for Webhook Signature Verification ---
+# --- Verify GitHub Signature ---
 def verify_github_signature(data, signature):
     if not GITHUB_WEBHOOK_SECRET:
-        print("Warning: GITHUB_WEBHOOK_SECRET is not set. Webhook signature will not be verified.")
+        logging.warning("GITHUB_WEBHOOK_SECRET is not set. Webhook signature will not be verified.")
         return True
 
     if signature.startswith('sha256='):
@@ -47,71 +54,65 @@ def verify_github_signature(data, signature):
     else:
         return False
 
-    mac = hmac.new(GITHUB_WEBHOOK_SECRET.encode('utf-8'), msg=data, digestmod=getattr(hashlib, hash_algorithm))
+    mac = hmac.new(GITHUB_WEBHOOK_SECRET.encode(), msg=data, digestmod=getattr(hashlib, hash_algorithm))
     return hmac.compare_digest(mac.hexdigest(), signature_hash)
 
 # --- Webhook Endpoint ---
 @app.route('/webhook', methods=['POST'])
 def github_webhook():
-    if request.method == 'POST':
-        github_signature = request.headers.get('X-Hub-Signature-256') or request.headers.get('X-Hub-Signature')
-        if github_signature is None:
-            print("No GitHub signature found in headers.")
-            if GITHUB_WEBHOOK_SECRET:
-                abort(403)
+    github_signature = request.headers.get('X-Hub-Signature-256') or request.headers.get('X-Hub-Signature')
+    if not github_signature and GITHUB_WEBHOOK_SECRET:
+        logging.warning("No GitHub signature found in headers.")
+        abort(403)
 
-        request_data = request.get_data()
-        if not verify_github_signature(request_data, github_signature):
-            print("Webhook signature verification failed.")
-            abort(403)
+    request_data = request.get_data()
+    if not verify_github_signature(request_data, github_signature):
+        logging.warning("Webhook signature verification failed.")
+        abort(403)
 
-        event_type = request.headers.get('X-GitHub-Event')
-        payload = request.json
+    event_type = request.headers.get('X-GitHub-Event')
+    payload = request.json
 
-        print(f"Received GitHub event: {event_type}")
+    logging.info(f"Received GitHub event: {event_type}")
 
+    try:
+        timestamp = datetime.utcnow().isoformat(timespec='seconds') + 'Z'
         processed_data = {}
-        try:
-            timestamp = datetime.utcnow().isoformat(timespec='seconds') + 'Z'
 
-            if event_type == 'push':
-                processed_data = process_push_event(payload, timestamp)
-            elif event_type == 'pull_request':
-                if payload['action'] == 'opened':
-                    processed_data = process_pull_request_opened_event(payload, timestamp)
-                elif payload['action'] == 'closed' and payload['pull_request']['merged']:
-                    processed_data = process_merge_event(payload, timestamp)
-                else:
-                    print(f"Ignoring pull_request event action: {payload['action']}")
-                    return jsonify({'status': 'ignored', 'message': 'Pull Request action not relevant'}), 200
+        if event_type == 'push':
+            processed_data = process_push_event(payload, timestamp)
+        elif event_type == 'pull_request':
+            if payload['action'] == 'opened':
+                processed_data = process_pull_request_opened_event(payload, timestamp)
+            elif payload['action'] == 'closed' and payload['pull_request']['merged']:
+                processed_data = process_merge_event(payload, timestamp)
             else:
-                print(f"Ignoring GitHub event type: {event_type}")
-                return jsonify({'status': 'ignored', 'message': 'Event type not relevant'}), 200
+                logging.info(f"Ignored pull_request action: {payload['action']}")
+                return jsonify({'status': 'ignored', 'message': 'Pull Request action not relevant'}), 200
+        else:
+            logging.info(f"Ignored GitHub event type: {event_type}")
+            return jsonify({'status': 'ignored', 'message': 'Event type not relevant'}), 200
 
-            if processed_data:
-                actions_collection.insert_one(processed_data)
-                print(f"Data stored in MongoDB: {processed_data}")
-                return jsonify({'status': 'success', 'message': 'Webhook received and processed'}), 200
-            else:
-                return jsonify({'status': 'ignored', 'message': 'Event processed but no data to store'}), 200
+        if processed_data:
+            actions_collection.insert_one(processed_data)
+            logging.info(f"Data stored in MongoDB: {processed_data}")
+            return jsonify({'status': 'success', 'message': 'Webhook received and processed'}), 200
+        else:
+            logging.info("Event processed but no data to store.")
+            return jsonify({'status': 'ignored', 'message': 'No data extracted'}), 200
 
-        except KeyError as e:
-            print(f"KeyError processing webhook payload: {e}. Payload structure mismatch.")
-            return jsonify({'status': 'error', 'message': f'Payload key missing: {e}'}), 400
-        except Exception as e:
-            print(f"An unexpected error occurred: {e}")
-            return jsonify({'status': 'error', 'message': f'Internal server error: {e}'}), 500
+    except KeyError as e:
+        logging.error(f"KeyError: Missing key in payload: {e}")
+        return jsonify({'status': 'error', 'message': f'Payload key missing: {e}'}), 400
+    except Exception as e:
+        logging.exception("Unexpected error during webhook processing")
+        return jsonify({'status': 'error', 'message': f'Internal server error: {e}'}), 500
 
-    return jsonify({'status': 'error', 'message': 'Method Not Allowed'}), 405
-
-# --- Payload Processing Functions ---
+# --- Payload Processing ---
 def process_push_event(payload, timestamp):
-    author = payload['pusher']['name'] if 'pusher' in payload and 'name' in payload['pusher'] else 'Unknown'
-    to_branch = payload['ref'].split('/')[-1] if 'ref' in payload else 'Unknown'
-    request_id = payload['after']
-
-    if not author:
-        author = payload['sender']['login'] if 'sender' in payload and 'login' in payload['sender'] else 'Unknown'
+    author = payload.get('pusher', {}).get('name', payload.get('sender', {}).get('login', 'Unknown'))
+    to_branch = payload.get('ref', '').split('/')[-1]
+    request_id = payload.get('after', 'N/A')
 
     return {
         'request_id': request_id,
@@ -136,28 +137,35 @@ def process_pull_request_opened_event(payload, timestamp):
 def process_merge_event(payload, timestamp):
     pr = payload['pull_request']
     return {
-        'request_id': str(pr['merge_commit_sha']) if pr['merge_commit_sha'] else str(pr['id']),
-        'author': pr['merged_by']['login'] if pr['merged_by'] else pr['user']['login'],
+        'request_id': pr['merge_commit_sha'] or str(pr['id']),
+        'author': pr['merged_by']['login'] if pr.get('merged_by') else pr['user']['login'],
         'action': 'MERGE',
         'from_branch': pr['head']['ref'],
         'to_branch': pr['base']['ref'],
         'timestamp': timestamp
     }
 
-# --- UI Data Endpoint (for polling from the UI) ---
+# --- Data Fetching Endpoint ---
 @app.route('/data', methods=['GET'])
 def get_data():
     try:
         latest_actions = list(actions_collection.find().sort('timestamp', -1).limit(10))
 
         if not latest_actions:
+            logging.info("No actions found in the database.")
             return jsonify({'status': 'empty', 'message': 'No data found in the database.'}), 404
 
         for action in latest_actions:
             action['_id'] = str(action['_id'])
 
+        logging.info(f"Fetched {len(latest_actions)} actions.")
         return jsonify({'status': 'success', 'data': latest_actions}), 200
 
     except Exception as e:
-        print(f"Error fetching data from MongoDB: {e}")
+        logging.error(f"Failed to fetch data from MongoDB: {e}")
         return jsonify({'status': 'error', 'message': f'Could not retrieve data: {e}'}), 500
+
+# --- Main Entry ---
+if __name__ == '__main__':
+    logging.info(f"Starting Flask app on port {PORT}...")
+    app.run(host='0.0.0.0', port=PORT)
