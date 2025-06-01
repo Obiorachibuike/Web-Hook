@@ -16,8 +16,7 @@ except ImportError:
 
 MONGO_URI = os.getenv("MONGO_URI")
 GITHUB_WEBHOOK_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET")
-# It's good practice to get the port from environment variables too, for flexible deployment
-PORT = int(os.getenv("PORT", 5000)) # Default to 5000 if not set
+PORT = int(os.getenv("PORT", 5000))  # Default to 5000 if not set
 
 if not MONGO_URI:
     print("Error: MONGO_URI environment variable not set.")
@@ -26,19 +25,18 @@ if not MONGO_URI:
 # MongoDB Connection
 try:
     client = MongoClient(MONGO_URI)
-    db = client['github_webhooks_db'] # Choose your database name
-    actions_collection = db['actions'] # Choose your collection name
+    db = client['github_webhooks_db']
+    actions_collection = db['actions']
     print("Connected to MongoDB successfully!")
 except Exception as e:
     print(f"Error connecting to MongoDB: {e}")
     exit(1)
 
-
 # --- Helper Function for Webhook Signature Verification ---
 def verify_github_signature(data, signature):
     if not GITHUB_WEBHOOK_SECRET:
         print("Warning: GITHUB_WEBHOOK_SECRET is not set. Webhook signature will not be verified.")
-        return True # Proceed without verification if no secret is set (NOT recommended for production)
+        return True
 
     if signature.startswith('sha256='):
         hash_algorithm = 'sha256'
@@ -51,7 +49,6 @@ def verify_github_signature(data, signature):
 
     mac = hmac.new(GITHUB_WEBHOOK_SECRET.encode('utf-8'), msg=data, digestmod=getattr(hashlib, hash_algorithm))
     return hmac.compare_digest(mac.hexdigest(), signature_hash)
-
 
 # --- Webhook Endpoint ---
 @app.route('/webhook', methods=['POST'])
@@ -107,9 +104,7 @@ def github_webhook():
 
     return jsonify({'status': 'error', 'message': 'Method Not Allowed'}), 405
 
-
 # --- Payload Processing Functions ---
-
 def process_push_event(payload, timestamp):
     author = payload['pusher']['name'] if 'pusher' in payload and 'name' in payload['pusher'] else 'Unknown'
     to_branch = payload['ref'].split('/')[-1] if 'ref' in payload else 'Unknown'
@@ -149,20 +144,20 @@ def process_merge_event(payload, timestamp):
         'timestamp': timestamp
     }
 
-
 # --- UI Data Endpoint (for polling from the UI) ---
 @app.route('/data', methods=['GET'])
 def get_data():
     try:
         latest_actions = list(actions_collection.find().sort('timestamp', -1).limit(10))
 
+        if not latest_actions:
+            return jsonify({'status': 'empty', 'message': 'No data found in the database.'}), 404
+
         for action in latest_actions:
             action['_id'] = str(action['_id'])
-        
-        return jsonify(latest_actions), 200
+
+        return jsonify({'status': 'success', 'data': latest_actions}), 200
+
     except Exception as e:
         print(f"Error fetching data from MongoDB: {e}")
-        return jsonify({'status': 'error', 'message': 'Could not retrieve data'}), 500
-
-# Removed the if __name__ == '__main__': block
-# Gunicorn will now directly import and run the 'app' object
+        return jsonify({'status': 'error', 'message': f'Could not retrieve data: {e}'}), 500
