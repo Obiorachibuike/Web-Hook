@@ -1,5 +1,6 @@
 import os
 import logging
+import uuid
 from flask import Flask, request, jsonify, abort
 from pymongo import MongoClient
 from datetime import datetime
@@ -10,6 +11,10 @@ import hashlib
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler("webhook.log"),
+        logging.StreamHandler()
+    ]
 )
 
 app = Flask(__name__)
@@ -60,22 +65,27 @@ def verify_github_signature(data, signature):
 # --- Webhook Endpoint ---
 @app.route('/webhook', methods=['POST'])
 def github_webhook():
+    request_id = str(uuid.uuid4())
+    logging.info(f"[{request_id}] --- New Webhook Request ---")
+
     github_signature = request.headers.get('X-Hub-Signature-256') or request.headers.get('X-Hub-Signature')
+
+    logging.info(f"[{request_id}] Headers: {dict(request.headers)}")
+    logging.info(f"[{request_id}] Raw Payload: {request.get_data(as_text=True)}")
+
     if not github_signature and GITHUB_WEBHOOK_SECRET:
-        logging.warning("No GitHub signature found in headers.")
-        # Sent response message that signature is missing
+        logging.warning(f"[{request_id}] No GitHub signature found in headers.")
         return jsonify({'status': 'error', 'message': 'GitHub signature missing in headers.'}), 403
 
     request_data = request.get_data()
     if not verify_github_signature(request_data, github_signature):
-        logging.warning("Webhook signature verification failed.")
-        # Sent response message about verification failure
+        logging.warning(f"[{request_id}] Webhook signature verification failed.")
         return jsonify({'status': 'error', 'message': 'Webhook signature verification failed.'}), 403
 
     event_type = request.headers.get('X-GitHub-Event')
     payload = request.json
 
-    logging.info(f"Received GitHub event: {event_type}")
+    logging.info(f"[{request_id}] Received GitHub event: {event_type}")
 
     try:
         timestamp = datetime.utcnow().isoformat(timespec='seconds') + 'Z'
@@ -84,30 +94,32 @@ def github_webhook():
         if event_type == 'push':
             processed_data = process_push_event(payload, timestamp)
         elif event_type == 'pull_request':
-            if payload['action'] == 'opened':
+            action = payload.get('action')
+            logging.info(f"[{request_id}] Pull request action: {action}")
+            if action == 'opened':
                 processed_data = process_pull_request_opened_event(payload, timestamp)
-            elif payload['action'] == 'closed' and payload['pull_request']['merged']:
+            elif action == 'closed' and payload['pull_request']['merged']:
                 processed_data = process_merge_event(payload, timestamp)
             else:
-                logging.info(f"Ignored pull_request action: {payload['action']}")
-                return jsonify({'status': 'ignored', 'message': f'Pull Request action not relevant: {payload["action"]}'}), 200
+                logging.info(f"[{request_id}] Ignored pull_request action: {action}")
+                return jsonify({'status': 'ignored', 'message': f'Pull Request action not relevant: {action}'}), 200
         else:
-            logging.info(f"Ignored GitHub event type: {event_type}")
+            logging.info(f"[{request_id}] Ignored GitHub event type: {event_type}")
             return jsonify({'status': 'ignored', 'message': f'Event type not relevant: {event_type}'}), 200
 
         if processed_data:
             actions_collection.insert_one(processed_data)
-            logging.info(f"Data stored in MongoDB: {processed_data}")
+            logging.info(f"[{request_id}] Data stored in MongoDB: {processed_data}")
             return jsonify({'status': 'success', 'message': 'Webhook received and processed', 'data': processed_data}), 200
         else:
-            logging.info("Event processed but no data to store.")
+            logging.info(f"[{request_id}] Event processed but no data to store.")
             return jsonify({'status': 'ignored', 'message': 'No data extracted from event'}), 200
 
     except KeyError as e:
-        logging.error(f"KeyError: Missing key in payload: {e}")
+        logging.error(f"[{request_id}] KeyError: Missing key in payload: {e}")
         return jsonify({'status': 'error', 'message': f'Payload key missing: {e}'}), 400
     except Exception as e:
-        logging.exception("Unexpected error during webhook processing")
+        logging.exception(f"[{request_id}] Unexpected error during webhook processing")
         return jsonify({'status': 'error', 'message': f'Internal server error: {e}'}), 500
 
 # --- Payload Processing ---
@@ -151,7 +163,6 @@ def process_merge_event(payload, timestamp):
 def get_data():
     try:
         latest_actions = list(actions_collection.find().sort('timestamp', -1).limit(10))
-
         if not latest_actions:
             logging.info("No actions found in the database.")
             return jsonify({'status': 'empty', 'message': 'No data found in the database.', 'data': []}), 200
@@ -170,4 +181,3 @@ def get_data():
 if __name__ == '__main__':
     logging.info(f"Starting Flask app on port {PORT}...")
     app.run(host='0.0.0.0', port=PORT)
-
