@@ -9,7 +9,7 @@ import hashlib
 
 # --- Logging Configuration ---
 logging.basicConfig(
-    level=logging.INFO,  # Change to DEBUG for verbose output
+    level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 
@@ -62,7 +62,7 @@ def verify_github_signature(data, signature):
 @app.route('/webhook', methods=['POST'])
 def github_webhook():
     request_id = str(uuid.uuid4())
-    logging.info(f"[{request_id}] --- New Webhook Request ---")
+    logging.info(f"[{request_id}] ✅ /webhook endpoint received a POST request")
 
     github_signature = request.headers.get('X-Hub-Signature-256') or request.headers.get('X-Hub-Signature')
     if not github_signature and GITHUB_WEBHOOK_SECRET:
@@ -78,6 +78,7 @@ def github_webhook():
     payload = request.json
 
     logging.info(f"[{request_id}] Received GitHub event: {event_type}")
+    logging.debug(f"[{request_id}] Payload: {payload}")
 
     try:
         timestamp = datetime.utcnow().isoformat(timespec='seconds') + 'Z'
@@ -99,7 +100,7 @@ def github_webhook():
 
         if processed_data:
             actions_collection.insert_one(processed_data)
-            logging.info(f"[{request_id}] Data stored in MongoDB: {processed_data}")
+            logging.info(f"[{request_id}] ✅ Data stored in MongoDB: {processed_data}")
             return jsonify({'status': 'success', 'message': 'Webhook received and processed', 'data': processed_data}), 200
         else:
             logging.info(f"[{request_id}] Event processed but no data to store.")
@@ -152,7 +153,7 @@ def process_merge_event(payload, timestamp):
 @app.route('/data', methods=['GET'])
 def get_data():
     request_id = str(uuid.uuid4())
-    logging.info(f"[{request_id}] --- New /data Request ---")
+    logging.info(f"[{request_id}] 🔍 New /data Request")
 
     try:
         latest_actions = list(actions_collection.find().sort('timestamp', -1).limit(10))
@@ -160,7 +161,7 @@ def get_data():
             action['_id'] = str(action['_id'])
 
         if not latest_actions:
-            logging.info(f"[{request_id}] No actions found. Sending empty response.")
+            logging.info(f"[{request_id}] No actions found.")
             return jsonify({
                 'status': 'empty',
                 'message': 'No data found in the database.',
@@ -185,5 +186,5 @@ def get_data():
 
 # --- Main Entry ---
 if __name__ == '__main__':
-    logging.info(f"Starting Flask app on port {PORT}...")
+    logging.info(f"🚀 Starting Flask app on port {PORT}...")
     app.run(host='0.0.0.0', port=PORT)
