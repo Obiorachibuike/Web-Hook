@@ -1,7 +1,7 @@
 import os
-import logging
 import uuid
-from flask import Flask, request, jsonify, abort
+import logging
+from flask import Flask, request, jsonify
 from pymongo import MongoClient
 from datetime import datetime
 import hmac
@@ -9,12 +9,8 @@ import hashlib
 
 # --- Logging Configuration ---
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.INFO,  # Change to DEBUG for verbose output
     format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler("webhook.log"),
-        logging.StreamHandler()
-    ]
 )
 
 app = Flask(__name__)
@@ -69,12 +65,8 @@ def github_webhook():
     logging.info(f"[{request_id}] --- New Webhook Request ---")
 
     github_signature = request.headers.get('X-Hub-Signature-256') or request.headers.get('X-Hub-Signature')
-
-    logging.info(f"[{request_id}] Headers: {dict(request.headers)}")
-    logging.info(f"[{request_id}] Raw Payload: {request.get_data(as_text=True)}")
-
     if not github_signature and GITHUB_WEBHOOK_SECRET:
-        logging.warning(f"[{request_id}] No GitHub signature found in headers.")
+        logging.warning(f"[{request_id}] GitHub signature missing.")
         return jsonify({'status': 'error', 'message': 'GitHub signature missing in headers.'}), 403
 
     request_data = request.get_data()
@@ -94,15 +86,13 @@ def github_webhook():
         if event_type == 'push':
             processed_data = process_push_event(payload, timestamp)
         elif event_type == 'pull_request':
-            action = payload.get('action')
-            logging.info(f"[{request_id}] Pull request action: {action}")
-            if action == 'opened':
+            if payload['action'] == 'opened':
                 processed_data = process_pull_request_opened_event(payload, timestamp)
-            elif action == 'closed' and payload['pull_request']['merged']:
+            elif payload['action'] == 'closed' and payload['pull_request']['merged']:
                 processed_data = process_merge_event(payload, timestamp)
             else:
-                logging.info(f"[{request_id}] Ignored pull_request action: {action}")
-                return jsonify({'status': 'ignored', 'message': f'Pull Request action not relevant: {action}'}), 200
+                logging.info(f"[{request_id}] Ignored pull_request action: {payload['action']}")
+                return jsonify({'status': 'ignored', 'message': f'Pull Request action not relevant: {payload["action"]}'}), 200
         else:
             logging.info(f"[{request_id}] Ignored GitHub event type: {event_type}")
             return jsonify({'status': 'ignored', 'message': f'Event type not relevant: {event_type}'}), 200
@@ -116,7 +106,7 @@ def github_webhook():
             return jsonify({'status': 'ignored', 'message': 'No data extracted from event'}), 200
 
     except KeyError as e:
-        logging.error(f"[{request_id}] KeyError: Missing key in payload: {e}")
+        logging.error(f"[{request_id}] KeyError: {e}")
         return jsonify({'status': 'error', 'message': f'Payload key missing: {e}'}), 400
     except Exception as e:
         logging.exception(f"[{request_id}] Unexpected error during webhook processing")
@@ -161,21 +151,37 @@ def process_merge_event(payload, timestamp):
 # --- Data Fetching Endpoint ---
 @app.route('/data', methods=['GET'])
 def get_data():
+    request_id = str(uuid.uuid4())
+    logging.info(f"[{request_id}] --- New /data Request ---")
+
     try:
         latest_actions = list(actions_collection.find().sort('timestamp', -1).limit(10))
-        if not latest_actions:
-            logging.info("No actions found in the database.")
-            return jsonify({'status': 'empty', 'message': 'No data found in the database.', 'data': []}), 200
-
         for action in latest_actions:
             action['_id'] = str(action['_id'])
 
-        logging.info(f"Fetched {len(latest_actions)} actions.")
-        return jsonify({'status': 'success', 'data': latest_actions}), 200
+        if not latest_actions:
+            logging.info(f"[{request_id}] No actions found. Sending empty response.")
+            return jsonify({
+                'status': 'empty',
+                'message': 'No data found in the database.',
+                'data': []
+            }), 200
+
+        logging.info(f"[{request_id}] Retrieved {len(latest_actions)} actions.")
+        logging.debug(f"[{request_id}] Response Data: {latest_actions}")
+
+        return jsonify({
+            'status': 'success',
+            'data': latest_actions
+        }), 200
 
     except Exception as e:
-        logging.error(f"Failed to fetch data from MongoDB: {e}")
-        return jsonify({'status': 'error', 'message': f'Could not retrieve data: {e}', 'data': []}), 500
+        logging.error(f"[{request_id}] Failed to fetch data: {e}")
+        return jsonify({
+            'status': 'error',
+            'message': f'Could not retrieve data: {e}',
+            'data': []
+        }), 500
 
 # --- Main Entry ---
 if __name__ == '__main__':
