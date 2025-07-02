@@ -37,7 +37,7 @@ try:
     actions_collection = db['actions']
     logging.info("Connected to MongoDB successfully.")
 except Exception as e:
-    logging.error(f"Error connecting to MongoDB: {e}")
+    logging.error(f"Err connecting to MongoDB: {e}")
     exit(1)
 
 # --- Verify GitHub Signature ---
